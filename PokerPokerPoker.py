@@ -18,6 +18,8 @@ INITIAL_CHIP_COUNT = 1000  # Adjust as needed
 SMALL_BLIND = 10
 BIG_BLIND = 20
 MINIMUM_BET = 20  # This could be the same as the big blind or a different value
+opponent_history = {}  # Dictionary to hold the history of each opponent's actions
+betting_history = []  # List to hold the sequence of betting actions
 
 players = [{'id': i + 1, 'status': 'active', 'last_action': None,
             'last_bet': 0, 'chips': INITIAL_CHIP_COUNT} for i in range(NUM_PLAYERS)]
@@ -171,52 +173,106 @@ def rank_to_human_readable(rank):
         return "High Card"
 
 
-def gto_decision(hand_strength, pot_size):
-    print(f"Hand strength: {hand_strength}, Pot size: {pot_size}")
-
-    bet_multiplier, bluff_threshold, value_bet_threshold = gtoHelper(
-        hand_strength)
-
-    # Determine action based on hand strength
-    if hand_strength > value_bet_threshold:
-        action = 'bet'
-        bet_size = max(pot_size * bet_multiplier, MINIMUM_BET)
-    elif hand_strength > bluff_threshold:
-        action = 'bluff'
-        bet_size = max(pot_size * bet_multiplier, MINIMUM_BET)
+def dynamic_gto_table(hand_strength, stage, stack_size, opponent_profile):
+    # Logic to adjust GTO strategy based on current game context
+    if stage == 'early' and stack_size > 100 * BIG_BLIND:
+        value_bet_threshold = 0.75
+        bluff_threshold = 0.25
+    elif stage == 'late' or stack_size < 50 * BIG_BLIND:
+        value_bet_threshold = 0.85
+        bluff_threshold = 0.15
     else:
-        action = 'check/fold'
-        bet_size = 0  # No bet for check/fold action
+        # Default values from the static table for simplicity
+        strategy = GTO_STRATEGY_TABLE[1.00]
+        value_bet_threshold = strategy['value_bet']
+        bluff_threshold = strategy['bluff']
 
-    print(f"Bet multiplier: {bet_multiplier}, Bet size: {bet_size}")
-    return action, bet_size
+    # Adjust based on opponent profile if available
+    if opponent_profile == 'aggressive':
+        bluff_threshold *= 1.2  # Bluff more against aggressive players
+
+    return value_bet_threshold, bluff_threshold
 
 
-def gtoHelper(hand_strength):
-    # Adjust bet multipliers based on hand strength
-    if hand_strength > 0.5:  # Adjust this threshold as needed
-        bet_multiplier = 2.00  # Very strong hand
-    elif hand_strength > 0.3:  # Adjust this threshold as needed
-        bet_multiplier = 1.50  # Moderately strong hand
+def model_opponent(opponent_actions, opponent_history):
+    if len(opponent_actions) > 6 and opponent_actions.count('raise') / len(opponent_actions) > 0.5:
+        return 'aggressive'
     else:
-        bet_multiplier = 1.00  # Weaker hand
-    strategy = GTO_STRATEGY_TABLE[bet_multiplier]
-    value_bet_threshold = strategy['value_bet']
-    bluff_threshold = strategy['bluff'] + value_bet_threshold
-    print(
-        f"Value bet threshold: {value_bet_threshold}, Bluff threshold: {bluff_threshold}")
-    return bet_multiplier, bluff_threshold, value_bet_threshold
+        return 'passive'
+
+
+def advanced_bluffing_strategy(opponent_profile, betting_history, hand_strength):
+    if opponent_profile == 'passive' and hand_strength > 0.6:  # Adjust threshold as needed
+        return True  # Bluff against passive players with weak hands
+    return False
+
+
+# Helper function to calculate pot odds
+
+
+def advanced_bet_sizing(hand_strength, pot_size, opponent_stack):
+    if hand_strength < 0.2:  # Strong hands have lower values
+        return max(pot_size * 0.75, opponent_stack)
+    elif hand_strength < 0.5:
+        return pot_size * 0.5
+    else:
+        return min(pot_size * 0.25, MINIMUM_BET)
 
 
 def calculate_pot_odds(call_amount, pot_size):
-    if call_amount == 0:  # Avoid division by zero
-        return -1
+    if call_amount < 0 or pot_size < 0:
+        print("Error: call_amount and pot_size should be non-negative.")
+        return None
+
+    # If there's nothing to call, the concept of pot odds doesn't really apply
+    if call_amount == 0:
+        # Indicates infinitely good odds, as you're not risking any additional chips
+        return 9999999
+
+    # Calculate and return the pot odds
     return pot_size / call_amount
+
+
+def gto_decision(hand_strength, pot_size, stage, opponent_actions, player_stack, opponent_stack):
+    print(f"Hand strength: {hand_strength}, Pot size: {pot_size}")
+
+    opponent_profile = model_opponent(opponent_actions, opponent_history)
+
+    # Get dynamic GTO thresholds based on the current context
+    value_bet_threshold, bluff_threshold = dynamic_gto_table(
+        hand_strength, stage, player_stack, opponent_profile)
+
+    # Determine if bluffing is a good strategy based on the opponent's profile and hand strength
+    should_bluff = advanced_bluffing_strategy(
+        opponent_profile, betting_history, hand_strength)
+
+    # Determine the action based on hand strength, value bet threshold, and bluffing strategy
+    if hand_strength > value_bet_threshold or should_bluff:
+        action = 'bet' if hand_strength < value_bet_threshold else 'bluff'
+        bet_size = advanced_bet_sizing(hand_strength, pot_size, opponent_stack)
+    else:
+        action = 'check/fold'
+        bet_size = 0
+
+    bet_size = scale_bet_by_pot(hand_strength, pot_size, MINIMUM_BET, bet_size)
+
+    print(f"Action: {action}, Bet Size: {bet_size}")
+    return action, bet_size if bet_size > MINIMUM_BET else MINIMUM_BET + bet_size
+
+
+def scale_bet_by_pot(hand_strength, pot_size, min_bet, max_bet):
+    # Scale the bet size based on the hand strength and pot size
+    bet_size = (1 - hand_strength) * pot_size
+
+    # Ensure the bet size is within the min/max bounds
+    return min(max_bet, max(min_bet, bet_size))
 
 
 def adjust_bet_for_pot_odds(bet_size, hand_strength, pot_size, call_amount):
     # Calculate the pot odds
     pot_odds = calculate_pot_odds(call_amount, pot_size)
+    print(
+        f"Bet Size: {bet_size}, Hand Strength: {hand_strength}, Pot Odds: {pot_odds}, Call Amount: {call_amount}")
 
     # Debug print to understand the values being processed
     print(
@@ -308,7 +364,7 @@ def handle_player_action(player, current_bet, pot_size, my_hand, community_cards
 
         # Determine valid actions
         valid_actions = ['fold']
-        valid_actions_helper(call_amount, player, valid_actions)
+        valid_actions_helper(call_amount, player, valid_actions, stage)
 
         print(
             f"{role} {player['id']} chips: {player['chips']}, pot size: {pot_size}")
@@ -325,6 +381,12 @@ def handle_player_action(player, current_bet, pot_size, my_hand, community_cards
 
         action = user_input(
             f"{role} {player['id']}, enter your action ({'/'.join(valid_actions)}): ").lower()
+
+        if player['id'] != user_player_number:  # If it's an opponent
+            opponent_history[player['id']] = opponent_history.get(
+                player['id'], []) + [action]
+            betting_history.append(
+                (player['id'], action, current_bet - player['last_bet']))
 
         if action not in valid_actions:
             print("Invalid action. Please try again.")
@@ -377,7 +439,7 @@ def handle_player_action(player, current_bet, pot_size, my_hand, community_cards
     return True, current_bet, pot_size  # Action resolved, return updated state
 
 
-def valid_actions_helper(call_amount, player, valid_actions):
+def valid_actions_helper(call_amount, player, valid_actions, stage):
     if player['chips'] >= call_amount:
         valid_actions.append('call')
         if call_amount == 0:
@@ -404,8 +466,22 @@ def player_gto_guidance(community_cards, current_bet, known_cards, my_hand, play
     if len(community_cards) >= 3:  # GTO decisions are more relevant post-flop
         combined_cards = my_hand + community_cards
         hand_strength = evaluate_hand_strength(combined_cards)
+        stage = 'early' if len(community_cards) <= 3 else 'late'
+        player_stack = player['chips']
+        opponent_stack = sum(
+            p['chips'] for p in players if p['id'] != player['id']) / (NUM_PLAYERS - 1)
+        opponent_actions = [p['last_action']
+                            for p in players if p['id'] != player['id']]
+
         gto_action, suggested_bet_size = gto_decision(
-            hand_strength, pot_size)
+            hand_strength,
+            pot_size,
+            stage,
+            opponent_actions,
+            player_stack,
+            opponent_stack
+        )
+
         suggested_bet_size = adjust_bet_for_pot_odds(
             suggested_bet_size, hand_strength, pot_size, current_bet)
         print(
