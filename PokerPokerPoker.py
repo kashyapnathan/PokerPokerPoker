@@ -1,9 +1,12 @@
+from collections import Counter
 import random
 from itertools import combinations
 from phevaluator import evaluate_cards, Card
+from colorama import Fore, Style
+from tabulate import tabulate
 
 # Constants
-NUM_PLAYERS = 3  # Including the user
+NUM_PLAYERS = 5  # Including the user
 user_player_number = int(
     input(f"Enter your player number (1-{NUM_PLAYERS}): "))
 dealer_position = int(
@@ -37,6 +40,22 @@ GTO_STRATEGY_TABLE = {
 # Functions
 
 
+def print_header(message):
+    print(f"{Fore.YELLOW}{message}{Style.RESET_ALL}")
+
+
+def print_info(message, value):
+    print(f"{Fore.CYAN}{message}: {Fore.GREEN}{value}{Style.RESET_ALL}")
+
+
+def print_action(player_id, action, amount):
+    print(f"Player {player_id} {action} {amount}")
+
+
+def print_table(data, headers):
+    print(tabulate(data, headers, tablefmt="pretty"))
+
+
 def assign_blinds(players):
     global small_blind_position, big_blind_position
 
@@ -44,8 +63,9 @@ def assign_blinds(players):
     players[small_blind_position]['chips'] -= SMALL_BLIND
     players[big_blind_position]['chips'] -= BIG_BLIND
 
-    print(f"Player {small_blind_position + 1} is the Small Blind.")
-    print(f"Player {big_blind_position + 1} is the Big Blind.")
+    print_header("Blind Assignments")
+    print_info("Small Blind", f"Player {small_blind_position + 1}")
+    print_info("Big Blind", f"Player {big_blind_position + 1}")
 
     # Return the total blinds to add to the pot
     return SMALL_BLIND + BIG_BLIND
@@ -211,12 +231,12 @@ def advanced_bluffing_strategy(opponent_profile, betting_history, hand_strength)
 
 
 def advanced_bet_sizing(hand_strength, pot_size, opponent_stack):
-    if hand_strength < 0.2:  # Strong hands have lower values
-        return max(pot_size * 0.75, opponent_stack)
-    elif hand_strength < 0.5:
-        return pot_size * 0.5
+    if hand_strength > 0.8:  # Strong hands have lower values
+        return max(pot_size * 2.75, opponent_stack)
+    elif hand_strength > 0.5:
+        return pot_size * 1.5
     else:
-        return min(pot_size * 0.25, MINIMUM_BET)
+        return min(pot_size * 0.5, MINIMUM_BET)
 
 
 def calculate_pot_odds(call_amount, pot_size):
@@ -247,22 +267,117 @@ def gto_decision(hand_strength, pot_size, stage, opponent_actions, player_stack,
         opponent_profile, betting_history, hand_strength)
 
     # Determine the action based on hand strength, value bet threshold, and bluffing strategy
-    if hand_strength > value_bet_threshold or should_bluff:
+    if hand_strength > value_bet_threshold or should_bluff or monte_carlo_simulation(my_hand, community_cards, known_cards) == 'raise':
         action = 'bet' if hand_strength < value_bet_threshold else 'bluff'
         bet_size = advanced_bet_sizing(hand_strength, pot_size, opponent_stack)
+        bet_size = scale_bet_by_pot(
+            hand_strength, pot_size, MINIMUM_BET, bet_size)
     else:
         action = 'check/fold'
         bet_size = 0
-
-    bet_size = scale_bet_by_pot(hand_strength, pot_size, MINIMUM_BET, bet_size)
 
     print(f"Action: {action}, Bet Size: {bet_size}")
     return action, bet_size if bet_size > MINIMUM_BET else MINIMUM_BET + bet_size
 
 
+def predict_opponent_hand(community_cards, opponent_actions, betting_round):
+    possible_hands = {
+        'high_card': 0.15,
+        'low_pair': 0.15,
+        'high_pair': 0.10,
+        'two_pair': 0.08,
+        'set': 0.05,
+        'straight': 0.08,
+        'flush': 0.06,
+        'full_house': 0.04,
+        'four_of_a_kind': 0.02,
+        'straight_flush': 0.01,
+        'royal_flush': 0.005,
+        'other': 0.20
+    }
+
+    # Adjust probabilities based on opponent actions and betting round
+    for action in opponent_actions:
+        if action == 'raise':
+            # Aggressive actions might indicate stronger hands
+            possible_hands['high_pair'] += 0.05
+            possible_hands['set'] += 0.04
+            possible_hands['straight'] += 0.03
+            possible_hands['flush'] += 0.03
+            possible_hands['full_house'] += 0.02
+            possible_hands['other'] -= 0.17
+        elif action == 'call':
+            # Passive actions might indicate drawing or mediocre hands
+            possible_hands['straight'] += 0.02
+            possible_hands['flush'] += 0.02
+            possible_hands['low_pair'] += 0.03
+            possible_hands['other'] -= 0.07
+
+    # Adjust based on the betting round
+    if betting_round == 'flop':
+        # On the flop, drawing hands have more potential
+        possible_hands['straight'] += 0.03
+        possible_hands['flush'] += 0.03
+    elif betting_round == 'turn':
+        # On the turn, completed hands are more likely
+        possible_hands['set'] += 0.02
+        possible_hands['two_pair'] += 0.02
+    elif betting_round == 'river':
+        # On the river, players are more likely to have made hands
+        possible_hands['straight'] += 0.01
+        possible_hands['flush'] += 0.01
+        possible_hands['full_house'] += 0.02
+
+    # Adjust based on community cards
+    # Check for same suit
+    flush_potential = len(set(card[1] for card in community_cards)) <= 2
+    # Implement this function based on community cards
+    straight_potential = is_straight_potential(community_cards)
+
+    if flush_potential:
+        possible_hands['flush'] += 0.05
+        possible_hands['straight_flush'] += 0.01
+    if straight_potential:
+        possible_hands['straight'] += 0.05
+
+    # Normalize probabilities to ensure they sum to 1
+    total_prob = sum(possible_hands.values())
+    for hand in possible_hands:
+        possible_hands[hand] /= total_prob
+
+    top_hands = Counter(possible_hands).most_common(5)
+    return top_hands
+
+
+def card_value(card):
+    """Convert card face to numerical value."""
+    values = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7,
+              '8': 8, '9': 9, 'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+    return values[card[0]]
+
+
+def is_straight_potential(community_cards):
+    """Check if there's a potential straight on the board."""
+    values = sorted([card_value(card) for card in community_cards])
+    gaps = [y - x for x, y in zip(values[:-1], values[1:])]
+
+    # Count the number of gaps and single card gaps which are potential connectors
+    total_gaps = sum(gap - 1 for gap in gaps if gap > 1)
+    single_gaps = sum(1 for gap in gaps if gap == 2)
+
+    # Check for potential straight
+    if total_gaps <= 2 and single_gaps <= 2:
+        # Allow for one gap or one card to complete the straight
+        return True
+    elif len(values) >= 4 and total_gaps == 1:
+        # Special case for four consecutive cards
+        return True
+    return False
+
+
 def scale_bet_by_pot(hand_strength, pot_size, min_bet, max_bet):
     # Scale the bet size based on the hand strength and pot size
-    bet_size = (1 - hand_strength) * pot_size
+    bet_size = (1 + hand_strength) * pot_size/1.5
 
     # Ensure the bet size is within the min/max bounds
     return min(max_bet, max(min_bet, bet_size))
@@ -273,10 +388,6 @@ def adjust_bet_for_pot_odds(bet_size, hand_strength, pot_size, call_amount):
     pot_odds = calculate_pot_odds(call_amount, pot_size)
     print(
         f"Bet Size: {bet_size}, Hand Strength: {hand_strength}, Pot Odds: {pot_odds}, Call Amount: {call_amount}")
-
-    # Debug print to understand the values being processed
-    print(
-        f"Adjusting for pot odds: Bet Size: {bet_size}, Hand Strength: {hand_strength}, Pot Odds: {pot_odds}, Call Amount: {call_amount}")
 
     if call_amount == 0:  # If there's nothing to call, return the original bet size
         return bet_size
@@ -332,18 +443,23 @@ def monte_carlo_simulation(my_hand, community_cards, known_cards):
 
 def betting_round(stage, players, current_bet, community_cards, my_hand, known_cards, pot_size):
     print(f"\n--- {stage} Betting Round ---")
-    actions_resolved = False
+    active_players = [
+        player for player in players if player['status'] != 'folded']
+    # Reset last action for all players at the beginning of each betting round
+    for player in active_players:
+        player['last_action'] = None
 
-    while not actions_resolved:
-        actions_resolved = True
-        for player in players:
-            if player['status'] != 'folded':
-                # Call handle_player_action with all required arguments
-                action_resolved, current_bet, pot_size = handle_player_action(
+    while True:
+        action_taken = False
+        for player in active_players:
+            # Players need to act if they haven't folded, have chips left, and haven't matched the current bet
+            if player['chips'] > 0 and (player['last_action'] is None or player['last_bet'] < current_bet):
+                _, current_bet, pot_size = handle_player_action(
                     player, current_bet, pot_size, my_hand, community_cards, known_cards, stage, small_blind_position, big_blind_position)
+                action_taken = True
 
-                if not action_resolved:
-                    actions_resolved = False  # If any action is not resolved, continue the loop
+        if not action_taken:
+            break  # Exit the loop if no actions were taken
 
     print(f"Pot size after {stage}: {pot_size}")
     return pot_size  # Return the updated pot size
@@ -388,6 +504,14 @@ def handle_player_action(player, current_bet, pot_size, my_hand, community_cards
             betting_history.append(
                 (player['id'], action, current_bet - player['last_bet']))
 
+            top_hands = predict_opponent_hand(
+                community_cards, opponent_history[player['id']], stage)
+            if stage != 'Pre-flop':
+                print_header(
+                    f"Top 5 predicted hand ranges for Player {player['id']}")
+                print_table([(hand, f"{likelihood*100:.1f}%")
+                            for hand, likelihood in top_hands], ["Hand", "Likelihood"])
+
         if action not in valid_actions:
             print("Invalid action. Please try again.")
             continue  # Stay in the loop until a valid action is provided
@@ -411,6 +535,10 @@ def handle_player_action(player, current_bet, pot_size, my_hand, community_cards
                 player['last_action'] = 'raise'
                 player['last_bet'] = current_bet
                 action_valid = True
+
+                for other_player in players:
+                    if other_player['id'] != player['id']:
+                        other_player['last_action'] = None
 
             except ValueError:
                 print("Please enter a valid number for the raise amount.")
@@ -540,6 +668,7 @@ pot_size = betting_round("Pre-flop", players, current_bet,
                          community_cards, my_hand, known_cards, pot_size)
 
 for stage, num_cards in [("Flop", 3), ("Turn", 1), ("River", 1)]:
+    # Deal stage cards and add to known and community cards
     round_cards_input = user_input(
         f"Enter the {stage} cards (e.g., 'AD KH 3D'): ").split()
     round_cards = [standardize_card_input(card) for card in round_cards_input]
@@ -547,12 +676,15 @@ for stage, num_cards in [("Flop", 3), ("Turn", 1), ("River", 1)]:
     known_cards.extend(round_cards)
     print(f"\n{stage} cards: {round_cards}")
     print(f"Community Cards: {community_cards}")
+
+    # Reset current bet for the new betting round
     current_bet = 0
-    pot_size += betting_round(stage, players, current_bet,
-                              community_cards, my_hand, known_cards, pot_size)
+    pot_size = betting_round(stage, players, current_bet,
+                             community_cards, my_hand, known_cards, pot_size)
 
 # Final results
 print("\nFinal round (River) complete.")
+print_header("Final Results")
 final_rank = evaluate_hand_strength(my_hand + community_cards)
-print(
-    f"Your final hand rank is {final_rank}, which is a {rank_to_human_readable(final_rank)}")
+print_info("Your final hand rank",
+           f"{final_rank} ({rank_to_human_readable(final_rank)})")
